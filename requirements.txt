@@ -1,0 +1,4 @@
+discord.py
+psutil
+python-dotenv
+bitcoin

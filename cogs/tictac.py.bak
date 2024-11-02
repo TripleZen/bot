@@ -1,0 +1,176 @@
+import json
+import discord
+from discord.ext import commands
+from bitcoinrpc.authproxy import AuthServiceProxy, JSONRPCException
+
+BOT_DEFAULT_ADDRESS = "ATUZnc6ABwcAUix4p2Lr8hDSuAmT62QEcJ"
+
+def get_config(section):
+    with open('config.json', 'r') as f:
+        config = json.load(f)
+    return config.get(section)
+
+class TicTacToeButton(discord.ui.Button):
+    def __init__(self, label, row):
+        super().__init__(style=discord.ButtonStyle.secondary, label=label, custom_id=label)
+        self.row = row
+
+    async def callback(self, interaction: discord.Interaction):
+        view: TicTacToeView = self.view
+        await view.handle_button_click(interaction, self)
+
+class AcceptButton(discord.ui.Button):
+    def __init__(self, label="Accept Challenge", style=discord.ButtonStyle.success):
+        super().__init__(label=label, style=style)
+
+    async def callback(self, interaction: discord.Interaction):
+        view: TicTacToeView = self.view
+        if view.challenger:
+            await interaction.response.send_message("This game has already been accepted.", ephemeral=True)
+        else:
+            challenger = interaction.user
+            challenger_balance = await view.bot.get_cog('TipAus').get_balance(str(challenger.id).replace('!', ''))
+            if challenger_balance < view.amount:
+                await interaction.response.send_message(f"You do not have enough balance to accept this challenge. You need at least {view.amount}.", ephemeral=True)
+                return
+            
+            view.challenger = challenger
+            view.players['X'] = challenger
+            view.players['O'] = view.ctx.author
+            
+            view.challenger_address = view.bot.get_cog('TipAus').get_address(str(challenger.id).replace('!', ''))
+            view.tipper_address = view.bot.get_cog('TipAus').get_address(str(view.ctx.author.id).replace('!', ''))
+
+            await interaction.response.edit_message(content=f'Game started! {challenger.mention} vs {view.ctx.author.mention}. {challenger.mention} goes first!', view=view)
+
+class TicTacToeView(discord.ui.View):
+    def __init__(self, bot, ctx, tipper, amount, rpc_client):
+        super().__init__(timeout=60)
+        self.bot = bot
+        self.ctx = ctx
+        self.tipper = tipper
+        self.amount = amount
+        self.rpc_client = rpc_client
+        self.turn = 'X'
+        self.players = {
+            'X': None,  # Challenger will be assigned later
+            'O': ctx.author
+        }
+        self.board = [str(i) for i in range(1, 10)]
+        self.msg = None
+        self.challenger = None
+        self.tipper_address = None
+        self.challenger_address = None
+        self.add_buttons()
+        self.add_item(AcceptButton())
+
+    def add_buttons(self):
+        for i in range(9):
+            row = i // 3
+            self.add_item(TicTacToeButton(label=self.board[i], row=row))
+
+    def get_button_style(self, value):
+        if value == 'X':
+            return discord.ButtonStyle.primary
+        elif value == 'O':
+            return discord.ButtonStyle.danger
+        else:
+            return discord.ButtonStyle.secondary
+
+    def check_for_win(self):
+        win = (
+            (self.board[0] == self.board[1] and self.board[1] == self.board[2]) or
+            (self.board[3] == self.board[4] and self.board[4] == self.board[5]) or
+            (self.board[6] == self.board[7] and self.board[7] == self.board[8]) or
+            (self.board[0] == self.board[4] and self.board[4] == self.board[8]) or
+            (self.board[2] == self.board[4] and self.board[4] == self.board[6]) or
+            (self.board[0] == self.board[3] and self.board[3] == self.board[6]) or
+            (self.board[1] == self.board[4] and self.board[4] == self.board[7]) or
+            (self.board[2] == self.board[5] and self.board[5] == self.board[8])
+        )
+        if not any(i.isdigit() for i in self.board) and not win:
+            return 2
+        else:
+            return win
+
+    async def send_cash(self, from_user, to_address, amount):
+        try:
+            txid = self.rpc_client.sendfrom(from_user, to_address, amount)
+            await self.ctx.send(f"Transaction ID: {txid}")
+        except JSONRPCException as e:
+            await self.ctx.send(f"Error: {e}")
+
+    async def handle_button_click(self, interaction: discord.Interaction, button: TicTacToeButton):
+        if self.challenger is None:
+            await interaction.response.send_message("Please accept the challenge first.", ephemeral=True)
+            return
+
+        if interaction.user != self.players[self.turn]:
+            await interaction.response.send_message(f"It's not your turn. It's {self.players[self.turn].mention}'s turn.", ephemeral=True)
+            return
+
+        square_clicked = int(button.label) - 1
+        self.board[square_clicked] = self.turn
+
+        game_won = self.check_for_win()
+
+        for child in self.children:
+            if isinstance(child, TicTacToeButton):
+                child.label = self.board[int(child.custom_id) - 1]
+                child.style = self.get_button_style(child.label)
+                child.disabled = bool(game_won)
+
+        if game_won:
+            if game_won == 2:
+                await interaction.response.edit_message(content='Game Over! It is a tie!', view=self)
+            else:
+                await interaction.response.edit_message(content=f'Game Over! {self.players[self.turn].mention} has won!', view=self)
+                if self.players[self.turn] == self.ctx.author:
+                    loser_id = str(self.challenger.id).replace('!', '')
+                    await self.send_cash(loser_id, self.tipper_address, self.amount)
+                else:
+                    loser_id = str(self.ctx.author.id).replace('!', '')
+                    await self.send_cash(loser_id, self.challenger_address, self.amount)
+            self.stop()
+        else:
+            self.turn = 'O' if self.turn == 'X' else 'X'
+            await interaction.response.edit_message(content=f"It is {self.players[self.turn].mention}'s turn.", view=self)
+
+class TicTacToe(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        config = get_config('ausd')
+        self.rpc_user = config['rpc_user']
+        self.rpc_password = config['rpc_password']
+        self.rpc_host = config['rpc_host']
+        self.rpc_port = config['rpc_port']
+        self.rpc_url = f"http://{self.rpc_user}:{self.rpc_password}@{self.rpc_host}:{self.rpc_port}"
+        self.aus = AuthServiceProxy(self.rpc_url)
+
+    @commands.command(
+        help="""TicTacToe game
+
+Arguments:
+amount: The amount of the bet."""
+    )
+    async def tictactoe(self, ctx, amount: float):
+        tipper = str(ctx.author.id).replace('!', '')
+
+        # Check tipper's balance using aus cog
+        tipper_balance = await self.bot.get_cog('TipAus').get_balance(tipper)
+        if tipper_balance < amount:
+            await ctx.send("You do not have enough balance to place this bet.")
+            return
+        elif amount > 100:
+            await ctx.send("You cannot place a bet that high.")
+            return
+
+        # Get tipper's deposit address
+        tipper_address = self.bot.get_cog('TipAus').get_address(tipper)
+
+        view = TicTacToeView(self.bot, ctx, tipper, amount, self.aus)
+        view.tipper_address = tipper_address
+        await ctx.send(f'Waiting for an opponent to accept the challenge.', view=view)
+
+async def setup(bot):
+    await bot.add_cog(TicTacToe(bot))

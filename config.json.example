@@ -1,0 +1,29 @@
+{
+    "cashd": {
+        "rpc_user": "cash",
+        "rpc_password": "changeme",
+        "rpc_host": "127.0.0.1",
+        "rpc_port": "8844"
+    },
+    "doged": {
+        "rpc_user": "doge",
+        "rpc_password": "changeme",
+        "rpc_host": "127.0.0.1",
+        "rpc_port": "8833"
+    },
+    "ausd": {
+        "rpc_user": "aus",
+        "rpc_password": "changeme",
+        "rpc_host": "127.0.0.1",
+        "rpc_port": "8855"
+    },
+    "dingod": {
+        "rpc_user": "dingo",
+        "rpc_password": "changeme",
+        "rpc_host": "127.0.0.1",
+        "rpc_port": "8866"
+    },
+    "moderation": {
+        "botspamchannels": [123456789012345678, 987654321098765432, 1257624615103103026, 1258185802081370122]
+    }
+}
